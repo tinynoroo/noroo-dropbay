@@ -81,6 +81,20 @@ def _part_size(upload_id):
     return path.stat().st_size if path.exists() else 0
 
 
+def _unique_blob_name(name):
+    """FTP 등으로 직접 내려받을 걸 고려해 원본 파일명 그대로 저장한다.
+
+    같은 이름이 이미 있으면 'name (2).ext' 식으로 겹치지 않게 붙인다.
+    """
+    if not (BLOB_DIR / name).exists():
+        return name
+    stem, suffix = os.path.splitext(name)
+    n = 2
+    while (BLOB_DIR / ("%s (%d)%s" % (stem, n, suffix))).exists():
+        n += 1
+    return "%s (%d)%s" % (stem, n, suffix)
+
+
 def _find_matching_session(fingerprint):
     """이름+크기+수정시각+앞부분 해시가 모두 같은, 아직 끝나지 않은 업로드를 찾는다.
 
@@ -219,14 +233,15 @@ def upload_complete(upload_id):
         if received != session["size"]:
             return jsonify({"error": "전송이 끝나지 않았습니다.", "receivedBytes": received}), 409
 
+        final_name = _unique_blob_name(session["name"])
         item = {
-            "id": upload_id,
-            "name": session["name"],
+            "id": final_name,
+            "name": final_name,
             "size": session["size"],
             "type": session["type"],
             "uploadedAt": datetime.now(timezone.utc).isoformat(),
         }
-        _part_path(upload_id).replace(BLOB_DIR / upload_id)
+        _part_path(upload_id).replace(BLOB_DIR / final_name)
         with _meta_lock:
             items = _load_meta()
             items.append(item)
