@@ -99,13 +99,22 @@
     padding: 10px 16px;
     font-size: 13px;
   }
-  .queue-item .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
-  .queue-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
-  .queue-item .pct { color: var(--text-dim); }
+  .queue-item .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 8px; }
+  .queue-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  .queue-item .status { display: flex; align-items: center; gap: 8px; color: var(--text-dim); flex-shrink: 0; }
   .queue-item .bar { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
-  .queue-item .bar > div { height: 100%; background: var(--accent); width: 0%; }
-  .queue-item.error .bar > div { background: var(--danger); }
-  .queue-item.error .pct { color: var(--danger); }
+  .queue-item .bar > div { height: 100%; background: var(--accent); width: 0%; transition: width .15s; }
+  .queue-item.retrying .bar > div { background: #d99a2b; }
+  .queue-item.retrying .status { color: #d99a2b; }
+  .queue-item.failed .bar > div { background: var(--danger); }
+  .queue-item.failed .status { color: var(--danger); }
+  .queue-item .link-btn {
+    border: none; background: none; padding: 0;
+    font-size: 12px; font-weight: 600;
+    color: var(--accent); cursor: pointer;
+    text-decoration: underline;
+  }
+  .queue-item.failed .link-btn { color: var(--danger); }
 
   #file-list { display: flex; flex-direction: column; overflow: hidden; }
   .file-row {
@@ -309,47 +318,152 @@ dropzone.addEventListener('drop', (e) => {
   if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
 });
 
+// ── 이어올리기(청크) 업로드 ─────────────────────────────────────────────
+//
+// 파일을 4MB 청크로 나눠 순서대로 보낸다. 네트워크가 끊기거나(백그라운드로
+// 넘어가서 브라우저가 요청을 죽이는 경우 포함) 요청이 실패하면 지수 백오프로
+// 재시도하고, 탭이 다시 보이거나 온라인 상태가 되면 즉시 재시도한다.
+// 서버가 알려주는 실제 수신 바이트부터 이어서 보내므로 처음부터 다시
+// 올리지 않는다.
+
+const CHUNK_SIZE = 4 * 1024 * 1024;
+const MAX_RETRY_DELAY = 30000;
+
+const pendingKicks = new Set();
+function wait(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, ms);
+    function finish() { pendingKicks.delete(finish); clearTimeout(timer); resolve(); }
+    pendingKicks.add(finish);
+  });
+}
+function kickAll() { for (const fn of Array.from(pendingKicks)) fn(); }
+document.addEventListener('visibilitychange', () => { if (!document.hidden) kickAll(); });
+window.addEventListener('online', kickAll);
+
+function renderQueueItem(item) {
+  const pct = item.file.size ? Math.round((item.offset / item.file.size) * 100) : 100;
+  item.el.className = 'queue-item card' + (item.status === 'retrying' ? ' retrying' : item.status === 'failed' ? ' failed' : '');
+  let statusHtml = '';
+  if (item.status === 'retrying') {
+    statusHtml = `<span>${pct}% · 재연결 시도 중…</span><button class="link-btn" data-action="retry">지금 재시도</button>`;
+  } else if (item.status === 'failed') {
+    statusHtml = `<span>업로드 실패</span><button class="link-btn" data-action="restart">다시 시도</button>`;
+  } else if (item.status === 'done') {
+    statusHtml = `<span>완료</span>`;
+  } else {
+    statusHtml = `<span>${pct}%</span><button class="link-btn" data-action="cancel">취소</button>`;
+  }
+  item.el.innerHTML = `<div class="row"><span class="name">${escapeHtml(item.file.name)}</span><span class="status">${statusHtml}</span></div><div class="bar"><div style="width:${pct}%"></div></div>`;
+}
+
+async function requestWithRetry(fn, item) {
+  let attempt = 0;
+  while (true) {
+    if (item.cancelled) return null;
+    let res = null;
+    try {
+      res = await fn();
+    } catch (e) {
+      res = null;
+    }
+    if (res && (res.ok || res.status === 409)) {
+      if (item.status !== 'uploading') { item.status = 'uploading'; renderQueueItem(item); }
+      return res;
+    }
+    if (res && res.status >= 400 && res.status < 500 && res.status !== 409) {
+      item.status = 'failed';
+      renderQueueItem(item);
+      return null;
+    }
+    attempt++;
+    item.status = 'retrying';
+    renderQueueItem(item);
+    await wait(Math.min(MAX_RETRY_DELAY, 1000 * Math.pow(2, Math.min(attempt - 1, 5))));
+  }
+}
+
+async function driveUpload(item) {
+  if (item.cancelled) return;
+
+  if (!item.uploadId) {
+    const res = await requestWithRetry(() => fetch('/api/upload/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: item.file.name, size: item.file.size, type: item.file.type || '' }),
+    }), item);
+    if (!res) return;
+    const data = await res.json();
+    item.uploadId = data.uploadId;
+    item.offset = data.receivedBytes;
+  }
+
+  while (item.offset < item.file.size) {
+    if (item.cancelled) return;
+    const chunk = item.file.slice(item.offset, Math.min(item.offset + CHUNK_SIZE, item.file.size));
+    const res = await requestWithRetry(() => fetch(`/api/upload/${item.uploadId}/chunk?offset=${item.offset}`, {
+      method: 'PUT',
+      body: chunk,
+    }), item);
+    if (!res) return;
+    const data = await res.json();
+    item.offset = data.receivedBytes;
+    renderQueueItem(item);
+  }
+
+  const res = await requestWithRetry(() => fetch(`/api/upload/${item.uploadId}/complete`, { method: 'POST' }), item);
+  if (!res) return;
+  const data = await res.json();
+  if (!data.saved) {
+    item.offset = data.receivedBytes || item.offset;
+    return driveUpload(item);
+  }
+  item.status = 'done';
+  renderQueueItem(item);
+  setTimeout(() => item.el.remove(), 1200);
+  loadFiles();
+}
+
+async function cancelUpload(item) {
+  item.cancelled = true;
+  kickAll();
+  item.el.remove();
+  if (item.uploadId) {
+    try { await fetch(`/api/upload/${item.uploadId}`, { method: 'DELETE' }); } catch (e) {}
+  }
+}
+
+function restartUpload(item) {
+  item.cancelled = false;
+  item.uploadId = null;
+  item.offset = 0;
+  item.status = 'uploading';
+  renderQueueItem(item);
+  driveUpload(item);
+}
+
+queueEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const el = btn.closest('.queue-item');
+  const item = el._item;
+  if (!item) return;
+  if (btn.dataset.action === 'cancel') cancelUpload(item);
+  else if (btn.dataset.action === 'retry') kickAll();
+  else if (btn.dataset.action === 'restart') restartUpload(item);
+});
+
 function uploadFiles(fileList) {
   const files = Array.from(fileList);
   if (!files.length) return;
 
   for (const file of files) {
-    const item = document.createElement('div');
-    item.className = 'queue-item card';
-    item.innerHTML = `<div class="row"><span class="name">${escapeHtml(file.name)}</span><span class="pct">0%</span></div><div class="bar"><div></div></div>`;
-    queueEl.appendChild(item);
-
-    const fd = new FormData();
-    fd.append('files', file);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const pct = Math.round((e.loaded / e.total) * 100);
-      item.querySelector('.pct').textContent = pct + '%';
-      item.querySelector('.bar > div').style.width = pct + '%';
-    };
-    xhr.onload = () => {
-      let ok = xhr.status >= 200 && xhr.status < 300;
-      let data = {};
-      try { data = JSON.parse(xhr.responseText); } catch (e) {}
-      if (ok && data.saved && data.saved.length) {
-        item.querySelector('.pct').textContent = '완료';
-        setTimeout(() => item.remove(), 1200);
-        loadFiles();
-      } else {
-        item.classList.add('error');
-        item.querySelector('.pct').textContent = '실패';
-        toast('업로드에 실패했습니다.');
-        setTimeout(() => item.remove(), 3200);
-      }
-    };
-    xhr.onerror = () => {
-      item.classList.add('error');
-      item.querySelector('.pct').textContent = '오류';
-      toast('네트워크 오류로 업로드하지 못했습니다.');
-    };
-    xhr.send(fd);
+    const el = document.createElement('div');
+    queueEl.appendChild(el);
+    const item = { file, el, uploadId: null, offset: 0, status: 'uploading', cancelled: false };
+    el._item = item;
+    renderQueueItem(item);
+    driveUpload(item);
   }
 }
 
