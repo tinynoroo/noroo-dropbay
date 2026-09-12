@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Noroo Cloud</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6fb;
+    --surface: #ffffff;
+    --border: #e2e6f0;
+    --text: #1a1d29;
+    --text-dim: #6b7280;
+    --accent: #4f6df5;
+    --accent-dim: #eef1ff;
+    --danger: #e5484d;
+    --danger-dim: #fdecec;
+    --success: #1f9d55;
+    --radius: 14px;
+    --shadow: 0 1px 2px rgba(20, 24, 40, .04), 0 8px 24px rgba(20, 24, 40, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1117;
+      --surface: #171a23;
+      --border: #2a2e3a;
+      --text: #eef0f6;
+      --text-dim: #9096a8;
+      --accent: #7b91ff;
+      --accent-dim: #1c2240;
+      --danger: #ff6b6f;
+      --danger-dim: #3a1f22;
+      --success: #3fc57a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Pretendard, Roboto, "Noto Sans KR", sans-serif;
+    padding: clamp(16px, 4vw, 48px);
+    max-width: 920px;
+    margin: 0 auto;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .logo {
+    width: 40px; height: 40px;
+    border-radius: 11px;
+    background: linear-gradient(135deg, var(--accent), #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .logo svg { width: 22px; height: 22px; stroke: white; }
+  header h1 { font-size: 19px; margin: 0; }
+  header p { font-size: 13px; color: var(--text-dim); margin: 2px 0 0; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+
+  #dropzone {
+    padding: clamp(28px, 6vw, 56px) 20px;
+    text-align: center;
+    cursor: pointer;
+    border: 2px dashed var(--border);
+    transition: border-color .15s, background .15s;
+    margin-bottom: 20px;
+  }
+  #dropzone.drag { border-color: var(--accent); background: var(--accent-dim); }
+  #dropzone svg { width: 40px; height: 40px; stroke: var(--accent); margin-bottom: 10px; }
+  #dropzone .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  #dropzone .hint { font-size: 13px; color: var(--text-dim); }
+  #dropzone button {
+    margin-top: 16px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 9px 18px;
+    border-radius: 9px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #dropzone button:hover { filter: brightness(1.08); }
+  #file-input { display: none; }
+
+  .storage {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .storage .bar {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .storage .bar > div {
+    height: 100%;
+    background: var(--accent);
+    width: 0%;
+    transition: width .3s;
+  }
+  .storage .label { white-space: nowrap; }
+
+  #queue { margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px; }
+  .queue-item {
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+  .queue-item .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+  .queue-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+  .queue-item .pct { color: var(--text-dim); }
+  .queue-item .bar { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+  .queue-item .bar > div { height: 100%; background: var(--accent); width: 0%; }
+  .queue-item.error .bar > div { background: var(--danger); }
+  .queue-item.error .pct { color: var(--danger); }
+
+  #file-list { display: flex; flex-direction: column; overflow: hidden; }
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .file-row:last-child { border-bottom: none; }
+  .file-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .file-meta { flex: 1; min-width: 0; }
+  .file-name {
+    font-size: 14px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .file-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .file-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .icon-btn {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+  .icon-btn:hover { background: var(--accent-dim); color: var(--accent); border-color: transparent; }
+  .icon-btn.danger:hover { background: var(--danger-dim); color: var(--danger); }
+  .icon-btn svg { width: 16px; height: 16px; }
+
+  #empty {
+    padding: 48px 20px;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  #toast {
+    position: fixed;
+    bottom: 20px; left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--text);
+    color: var(--bg);
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity .2s, transform .2s;
+    pointer-events: none;
+    max-width: 90vw;
+    text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  section-title { display: none; }
+  .section-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--text-dim);
+    margin: 0 4px 8px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M7 18a4.5 4.5 0 0 1-.5-8.98A5.5 5.5 0 0 1 17 8.5a4 4 0 0 1 .5 7.98" />
+      <path d="M12 12v7" /><path d="m9 15 3-3 3 3" />
+    </svg>
+  </div>
+  <div>
+    <h1>Noroo Cloud</h1>
+    <p>파일을 업로드하고 언제든 다시 내려받으세요</p>
+  </div>
+</header>
+
+<div id="dropzone" class="card">
+  <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 15V3" /><path d="m7 8 5-5 5 5" />
+    <path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4" />
+  </svg>
+  <div class="title">여기로 파일을 끌어다 놓으세요</div>
+  <div class="hint">또는 아래 버튼으로 파일을 선택하세요 · 파일당 최대 <span id="max-file-hint">-</span></div>
+  <button type="button" id="browse-btn">파일 선택</button>
+  <input type="file" id="file-input" multiple />
+</div>
+
+<div class="storage card">
+  <div class="label" id="storage-label">사용량 계산 중…</div>
+  <div class="bar"><div id="storage-fill"></div></div>
+</div>
+
+<div id="queue"></div>
+
+<div class="section-title">업로드된 파일</div>
+<div id="file-list-wrap" class="card">
+  <div id="file-list"></div>
+  <div id="empty">아직 업로드된 파일이 없습니다.</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const browseBtn = document.getElementById('browse-btn');
+const queueEl = document.getElementById('queue');
+const fileListEl = document.getElementById('file-list');
+const emptyEl = document.getElementById('empty');
+const storageLabel = document.getElementById('storage-label');
+const storageFill = document.getElementById('storage-fill');
+const maxFileHint = document.getElementById('max-file-hint');
+const toastEl = document.getElementById('toast');
+
+let maxFileMB = 200;
+
+function fmtSize(bytes) {
+  if (bytes === 0) return '0B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + units[i];
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60) return '방금 전';
+  if (diff < 3600) return Math.floor(diff / 60) + '분 전';
+  if (diff < 86400) return Math.floor(diff / 3600) + '시간 전';
+  if (diff < 86400 * 7) return Math.floor(diff / 86400) + '일 전';
+  return d.toLocaleDateString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+function extBadge(name) {
+  const ext = (name.split('.').pop() || '?').slice(0, 4).toUpperCase();
+  return ext;
+}
+
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => toastEl.classList.remove('show'), 3200);
+}
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const cfg = await res.json();
+    maxFileMB = cfg.maxFileMB;
+    maxFileHint.textContent = maxFileMB + 'MB';
+  } catch (e) { maxFileHint.textContent = '200MB'; }
+}
+
+async function loadFiles() {
+  const res = await fetch('/api/files');
+  const data = await res.json();
+  renderFiles(data.files);
+  renderStorage(data.totalBytes, data.maxTotalBytes);
+}
+
+function renderStorage(used, max) {
+  const pct = max ? Math.min(100, (used / max) * 100) : 0;
+  storageFill.style.width = pct + '%';
+  storageLabel.textContent = fmtSize(used) + ' / ' + fmtSize(max) + ' 사용 중';
+}
+
+function renderFiles(files) {
+  fileListEl.innerHTML = '';
+  emptyEl.style.display = files.length ? 'none' : 'block';
+  for (const f of files) {
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    row.innerHTML = `
+      <div class="file-icon">${extBadge(f.name)}</div>
+      <div class="file-meta">
+        <div class="file-name">${escapeHtml(f.name)}</div>
+        <div class="file-sub">${fmtSize(f.size)} · ${fmtTime(f.uploadedAt)}</div>
+      </div>
+      <div class="file-actions">
+        <button class="icon-btn" title="다운로드" data-action="download" data-id="${f.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        </button>
+        <button class="icon-btn danger" title="삭제" data-action="delete" data-id="${f.id}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </button>
+      </div>`;
+    fileListEl.appendChild(row);
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+fileListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (btn.dataset.action === 'download') {
+    window.location.href = '/api/files/' + id + '/download';
+  } else if (btn.dataset.action === 'delete') {
+    if (!confirm('이 파일을 삭제할까요?')) return;
+    const res = await fetch('/api/files/' + id, { method: 'DELETE' });
+    if (res.ok) { toast('삭제했습니다.'); loadFiles(); }
+    else toast('삭제하지 못했습니다.');
+  }
+});
+
+browseBtn.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('click', (e) => { if (e.target === dropzone || dropzone.contains(e.target) && e.target.tagName !== 'BUTTON') fileInput.click(); });
+fileInput.addEventListener('change', () => { uploadFiles(fileInput.files); fileInput.value = ''; });
+
+['dragenter', 'dragover'].forEach(evt =>
+  dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(evt =>
+  dropzone.addEventListener(evt, (e) => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+dropzone.addEventListener('drop', (e) => {
+  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+});
+
+function uploadFiles(fileList) {
+  const files = Array.from(fileList);
+  if (!files.length) return;
+
+  for (const file of files) {
+    const item = document.createElement('div');
+    item.className = 'queue-item card';
+    item.innerHTML = `<div class="row"><span class="name">${escapeHtml(file.name)}</span><span class="pct">0%</span></div><div class="bar"><div></div></div>`;
+    queueEl.appendChild(item);
+
+    const fd = new FormData();
+    fd.append('files', file);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload');
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round((e.loaded / e.total) * 100);
+      item.querySelector('.pct').textContent = pct + '%';
+      item.querySelector('.bar > div').style.width = pct + '%';
+    };
+    xhr.onload = () => {
+      let ok = xhr.status >= 200 && xhr.status < 300;
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (ok && data.saved && data.saved.length) {
+        item.querySelector('.pct').textContent = '완료';
+        setTimeout(() => item.remove(), 1200);
+        loadFiles();
+      } else {
+        item.classList.add('error');
+        const msg = (data.errors && data.errors[0]) || '업로드에 실패했습니다.';
+        item.querySelector('.pct').textContent = '실패';
+        toast(msg);
+        setTimeout(() => item.remove(), 3200);
+      }
+      if (data.errors && data.errors.length) toast(data.errors[0]);
+    };
+    xhr.onerror = () => {
+      item.classList.add('error');
+      item.querySelector('.pct').textContent = '오류';
+      toast('네트워크 오류로 업로드하지 못했습니다.');
+    };
+    xhr.send(fd);
+  }
+}
+
+loadConfig();
+loadFiles();
+</script>
+</body>
+</html>
