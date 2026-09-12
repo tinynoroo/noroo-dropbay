@@ -4,18 +4,19 @@ services:
     build: .
     image: upload-prj:local
     restart: unless-stopped
+    # 도커 볼륨 대신 저장소 안 ./data 로 바인드 마운트한다. 컨테이너를
+    # 호스트 사용자(1000:1000)로 돌려서 파일이 root 소유가 되지
+    # 않고 sudo 없이 바로 열어볼 수 있게 한다.
+    user: "1000:1000"
     ports:
       # 호스트 Caddy가 이 포트로 프록시한다. app.json 의 port 와 같아야 한다.
       - "127.0.0.1:9002:8000"
     volumes:
-      - uploads-data:/app/data
+      - ./data:/app/data
     networks: [default, dbnet]
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
-
-volumes:
-  uploads-data:
 
 networks:
   # DB를 쓰지 않지만 deployctl validate가 모든 사이트에 dbnet 참여를 요구한다 (규칙 4-1).
