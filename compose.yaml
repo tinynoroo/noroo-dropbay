@@ -4,9 +4,6 @@ services:
     build: .
     image: upload-prj:local
     restart: unless-stopped
-    environment:
-      MAX_FILE_MB: "200"
-      MAX_TOTAL_MB: "2048"
     ports:
       # 호스트 Caddy가 이 포트로 프록시한다. app.json 의 port 와 같아야 한다.
       - "127.0.0.1:9002:8000"

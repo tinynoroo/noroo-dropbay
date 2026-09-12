@@ -6,23 +6,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory, send_file, abort
+from flask import Flask, jsonify, request, send_from_directory, abort
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 BLOB_DIR = DATA_DIR / "blobs"
 META_PATH = DATA_DIR / "meta.json"
 STATIC_DIR = Path(__file__).parent / "static"
 
-MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "200"))
-MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "2048"))
-MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
-MAX_TOTAL_BYTES = MAX_TOTAL_MB * 1024 * 1024
-
 BLOB_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
-# 여러 파일을 한 요청으로 올릴 수 있어 개별 파일 상한보다 여유를 둔다.
-app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_BYTES * 4
 
 _lock = threading.Lock()
 
@@ -42,10 +35,6 @@ def _save_meta(items):
     tmp.replace(META_PATH)
 
 
-def _total_bytes(items):
-    return sum(item["size"] for item in items)
-
-
 def _human_name(name):
     return os.path.basename(name or "file")
 
@@ -55,21 +44,12 @@ def index():
     return send_from_directory(STATIC_DIR, "index.html")
 
 
-@app.get("/api/config")
-def config():
-    return jsonify({"maxFileMB": MAX_FILE_MB, "maxTotalMB": MAX_TOTAL_MB})
-
-
 @app.get("/api/files")
 def list_files():
     with _lock:
         items = _load_meta()
     items = sorted(items, key=lambda i: i["uploadedAt"], reverse=True)
-    return jsonify({
-        "files": items,
-        "totalBytes": _total_bytes(items),
-        "maxTotalBytes": MAX_TOTAL_BYTES,
-    })
+    return jsonify({"files": items})
 
 
 @app.post("/api/upload")
@@ -80,8 +60,7 @@ def upload():
 
     with _lock:
         items = _load_meta()
-        used = _total_bytes(items)
-        saved, errors = [], []
+        saved = []
 
         for f in uploaded:
             name = _human_name(f.filename)
@@ -92,16 +71,6 @@ def upload():
             f.save(blob_path)
             size = blob_path.stat().st_size
 
-            if size > MAX_FILE_BYTES:
-                blob_path.unlink(missing_ok=True)
-                errors.append("%s: 파일당 최대 %dMB까지 가능합니다." % (name, MAX_FILE_MB))
-                continue
-            if used + size > MAX_TOTAL_BYTES:
-                blob_path.unlink(missing_ok=True)
-                errors.append("%s: 저장 공간이 부족합니다." % name)
-                continue
-
-            used += size
             item = {
                 "id": file_id,
                 "name": name,
@@ -114,20 +83,7 @@ def upload():
 
         _save_meta(items)
 
-    status = 201 if saved else 400
-    return jsonify({"saved": saved, "errors": errors}), status
-
-
-@app.get("/api/files/<file_id>/download")
-def download(file_id):
-    with _lock:
-        items = _load_meta()
-    item = next((i for i in items if i["id"] == file_id), None)
-    blob_path = BLOB_DIR / file_id
-    if not item or not blob_path.exists():
-        abort(404)
-    return send_file(blob_path, mimetype=item["type"],
-                      as_attachment=True, download_name=item["name"])
+    return jsonify({"saved": saved}), 201 if saved else 400
 
 
 @app.delete("/api/files/<file_id>")
@@ -140,11 +96,6 @@ def delete(file_id):
         _save_meta(remaining)
     (BLOB_DIR / file_id).unlink(missing_ok=True)
     return jsonify({"ok": True})
-
-
-@app.errorhandler(413)
-def too_large(_e):
-    return jsonify({"error": "요청이 너무 큽니다. 파일당 최대 %dMB까지 가능합니다." % MAX_FILE_MB}), 413
 
 
 if __name__ == "__main__":

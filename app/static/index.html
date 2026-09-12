@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Noroo Cloud</title>
+<title>Cloud</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -93,30 +93,6 @@
   }
   #dropzone button:hover { filter: brightness(1.08); }
   #file-input { display: none; }
-
-  .storage {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 18px;
-    margin-bottom: 20px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-  .storage .bar {
-    flex: 1;
-    height: 6px;
-    border-radius: 3px;
-    background: var(--border);
-    overflow: hidden;
-  }
-  .storage .bar > div {
-    height: 100%;
-    background: var(--accent);
-    width: 0%;
-    transition: width .3s;
-  }
-  .storage .label { white-space: nowrap; }
 
   #queue { margin-bottom: 20px; display: flex; flex-direction: column; gap: 8px; }
   .queue-item {
@@ -214,8 +190,8 @@
     </svg>
   </div>
   <div>
-    <h1>Noroo Cloud</h1>
-    <p>파일을 업로드하고 언제든 다시 내려받으세요</p>
+    <h1>Cloud</h1>
+    <p>파일을 업로드하고 목록으로 관리하세요</p>
   </div>
 </header>
 
@@ -225,14 +201,9 @@
     <path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4" />
   </svg>
   <div class="title">여기로 파일을 끌어다 놓으세요</div>
-  <div class="hint">또는 아래 버튼으로 파일을 선택하세요 · 파일당 최대 <span id="max-file-hint">-</span></div>
+  <div class="hint">또는 아래 버튼으로 파일을 선택하세요</div>
   <button type="button" id="browse-btn">파일 선택</button>
   <input type="file" id="file-input" multiple />
-</div>
-
-<div class="storage card">
-  <div class="label" id="storage-label">사용량 계산 중…</div>
-  <div class="bar"><div id="storage-fill"></div></div>
 </div>
 
 <div id="queue"></div>
@@ -252,12 +223,7 @@ const browseBtn = document.getElementById('browse-btn');
 const queueEl = document.getElementById('queue');
 const fileListEl = document.getElementById('file-list');
 const emptyEl = document.getElementById('empty');
-const storageLabel = document.getElementById('storage-label');
-const storageFill = document.getElementById('storage-fill');
-const maxFileHint = document.getElementById('max-file-hint');
 const toastEl = document.getElementById('toast');
-
-let maxFileMB = 200;
 
 function fmtSize(bytes) {
   if (bytes === 0) return '0B';
@@ -288,26 +254,10 @@ function toast(msg) {
   toast._t = setTimeout(() => toastEl.classList.remove('show'), 3200);
 }
 
-async function loadConfig() {
-  try {
-    const res = await fetch('/api/config');
-    const cfg = await res.json();
-    maxFileMB = cfg.maxFileMB;
-    maxFileHint.textContent = maxFileMB + 'MB';
-  } catch (e) { maxFileHint.textContent = '200MB'; }
-}
-
 async function loadFiles() {
   const res = await fetch('/api/files');
   const data = await res.json();
   renderFiles(data.files);
-  renderStorage(data.totalBytes, data.maxTotalBytes);
-}
-
-function renderStorage(used, max) {
-  const pct = max ? Math.min(100, (used / max) * 100) : 0;
-  storageFill.style.width = pct + '%';
-  storageLabel.textContent = fmtSize(used) + ' / ' + fmtSize(max) + ' 사용 중';
 }
 
 function renderFiles(files) {
@@ -323,9 +273,6 @@ function renderFiles(files) {
         <div class="file-sub">${fmtSize(f.size)} · ${fmtTime(f.uploadedAt)}</div>
       </div>
       <div class="file-actions">
-        <button class="icon-btn" title="다운로드" data-action="download" data-id="${f.id}">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-        </button>
         <button class="icon-btn danger" title="삭제" data-action="delete" data-id="${f.id}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         </button>
@@ -342,9 +289,7 @@ fileListEl.addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-action]');
   if (!btn) return;
   const id = btn.dataset.id;
-  if (btn.dataset.action === 'download') {
-    window.location.href = '/api/files/' + id + '/download';
-  } else if (btn.dataset.action === 'delete') {
+  if (btn.dataset.action === 'delete') {
     if (!confirm('이 파일을 삭제할까요?')) return;
     const res = await fetch('/api/files/' + id, { method: 'DELETE' });
     if (res.ok) { toast('삭제했습니다.'); loadFiles(); }
@@ -394,12 +339,10 @@ function uploadFiles(fileList) {
         loadFiles();
       } else {
         item.classList.add('error');
-        const msg = (data.errors && data.errors[0]) || '업로드에 실패했습니다.';
         item.querySelector('.pct').textContent = '실패';
-        toast(msg);
+        toast('업로드에 실패했습니다.');
         setTimeout(() => item.remove(), 3200);
       }
-      if (data.errors && data.errors.length) toast(data.errors[0]);
     };
     xhr.onerror = () => {
       item.classList.add('error');
@@ -410,7 +353,6 @@ function uploadFiles(fileList) {
   }
 }
 
-loadConfig();
 loadFiles();
 </script>
 </body>
