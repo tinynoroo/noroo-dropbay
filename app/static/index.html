@@ -341,6 +341,19 @@ function kickAll() { for (const fn of Array.from(pendingKicks)) fn(); }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) kickAll(); });
 window.addEventListener('online', kickAll);
 
+// 새로고침/탭 종료로 File 객체를 잃어도, 같은 파일을 다시 고르면 이름+크기+
+// 수정시각+앞부분 해시로 서버가 미완성 업로드를 알아보고 이어받는다.
+async function computeFingerprint(file) {
+  try {
+    const prefix = await file.slice(0, 65536).arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', prefix);
+    const prefixHash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    return { lastModified: file.lastModified, prefixHash };
+  } catch (e) {
+    return { lastModified: file.lastModified, prefixHash: null };
+  }
+}
+
 function renderQueueItem(item) {
   const pct = item.file.size ? Math.round((item.offset / item.file.size) * 100) : 100;
   item.el.className = 'queue-item card' + (item.status === 'retrying' ? ' retrying' : item.status === 'failed' ? ' failed' : '');
@@ -387,15 +400,22 @@ async function driveUpload(item) {
   if (item.cancelled) return;
 
   if (!item.uploadId) {
+    const fp = await computeFingerprint(item.file);
     const res = await requestWithRetry(() => fetch('/api/upload/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: item.file.name, size: item.file.size, type: item.file.type || '' }),
+      body: JSON.stringify({
+        name: item.file.name, size: item.file.size, type: item.file.type || '',
+        lastModified: fp.lastModified, prefixHash: fp.prefixHash,
+      }),
     }), item);
     if (!res) return;
     const data = await res.json();
     item.uploadId = data.uploadId;
     item.offset = data.receivedBytes;
+    if (data.resumed && data.receivedBytes > 0) {
+      toast(`이어서 업로드합니다 (${Math.round((data.receivedBytes / item.file.size) * 100)}%부터)`);
+    }
   }
 
   while (item.offset < item.file.size) {

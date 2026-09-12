@@ -20,6 +20,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None)
 
 _meta_lock = threading.Lock()
+_init_lock = threading.Lock()
 _upload_locks = {}
 _upload_locks_guard = threading.Lock()
 
@@ -80,6 +81,22 @@ def _part_size(upload_id):
     return path.stat().st_size if path.exists() else 0
 
 
+def _find_matching_session(fingerprint):
+    """이름+크기+수정시각+앞부분 해시가 모두 같은, 아직 끝나지 않은 업로드를 찾는다.
+
+    새로고침으로 브라우저가 이전 File 객체를 잃어도 사용자가 같은 파일을
+    다시 고르면 여기서 알아보고 이어받을 수 있게 한다.
+    """
+    for path in UPLOAD_DIR.glob("*.json"):
+        try:
+            session = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if session.get("fingerprint") == fingerprint:
+            return path.stem, session
+    return None
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -127,16 +144,34 @@ def upload_init():
     if not name or size < 0:
         return jsonify({"error": "잘못된 요청입니다."}), 400
     mimetype = body.get("type") or mimetypes.guess_type(name)[0] or "application/octet-stream"
-
-    upload_id = uuid.uuid4().hex
-    _part_path(upload_id).write_bytes(b"")
-    _session_path(upload_id).write_text(json.dumps({
+    fingerprint = {
         "name": name,
         "size": size,
-        "type": mimetype,
-        "createdAt": datetime.now(timezone.utc).isoformat(),
-    }, ensure_ascii=False))
-    return jsonify({"uploadId": upload_id, "receivedBytes": 0}), 201
+        "lastModified": body.get("lastModified"),
+        "prefixHash": body.get("prefixHash"),
+    }
+
+    with _init_lock:
+        if fingerprint["lastModified"] is not None and fingerprint["prefixHash"]:
+            match = _find_matching_session(fingerprint)
+            if match:
+                upload_id, _session = match
+                return jsonify({
+                    "uploadId": upload_id,
+                    "receivedBytes": _part_size(upload_id),
+                    "resumed": True,
+                }), 200
+
+        upload_id = uuid.uuid4().hex
+        _part_path(upload_id).write_bytes(b"")
+        _session_path(upload_id).write_text(json.dumps({
+            "name": name,
+            "size": size,
+            "type": mimetype,
+            "fingerprint": fingerprint,
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }, ensure_ascii=False))
+    return jsonify({"uploadId": upload_id, "receivedBytes": 0, "resumed": False}), 201
 
 
 @app.get("/api/upload/<upload_id>")
