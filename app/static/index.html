@@ -355,7 +355,7 @@ async function computeFingerprint(file) {
 }
 
 function renderQueueItem(item) {
-  const pct = item.file.size ? Math.round((item.offset / item.file.size) * 100) : 100;
+  const pct = item.file.size ? ((item.offset / item.file.size) * 100).toFixed(1) : '100.0';
   item.el.className = 'queue-item card' + (item.status === 'retrying' ? ' retrying' : item.status === 'failed' ? ' failed' : '');
   let statusHtml = '';
   if (item.status === 'retrying') {
