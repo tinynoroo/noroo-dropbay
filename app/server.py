@@ -40,10 +40,16 @@ def _token_ok(candidate):
 
 
 def _presented_token():
+    # ① 전용 헤더. Authorization 은 커넥터 UI 가 막아두는 경우가 있어
+    #    제한이 덜한 이름을 하나 더 받는다.
+    direct = request.headers.get("X-Upload-Token", "").strip()
+    if direct:
+        return direct
+    # ② 표준 Bearer
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:].strip()
-    # /mcp/<토큰> 형태
+    # ③ /mcp/<토큰> — 헤더를 전혀 못 넣는 UI 용
     parts = request.path.strip("/").split("/")
     if len(parts) == 2 and parts[0] == "mcp":
         return parts[1]
