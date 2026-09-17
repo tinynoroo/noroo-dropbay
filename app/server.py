@@ -34,6 +34,12 @@ app = Flask(__name__, static_folder=None)
 TOKEN = os.environ.get("UPLOAD_TOKEN", "")
 OPEN_PATHS = {"/healthz"}
 
+# MCP 클라이언트는 인증 없는 401 을 "이 서버는 OAuth 를 쓴다"는 신호로 읽는다.
+# 그래서 /mcp 의 접속 단계(initialize, tools/list)는 토큰 없이 통과시키고,
+# 실제로 파일을 쓰는 tools/call 에서만 토큰을 본다. 드러나는 것은 도구 이름과
+# 설명뿐이고, 저장된 파일과 업로드 기능은 그대로 잠겨 있다.
+MCP_OPEN_METHODS = {"initialize", "notifications/initialized", "initialized", "tools/list"}
+
 
 def _token_ok(candidate):
     return bool(TOKEN) and bool(candidate) and hmac.compare_digest(candidate, TOKEN)
@@ -70,12 +76,30 @@ def _presented_token():
     return ""
 
 
+def _is_open_mcp_call():
+    """접속 단계(handshake)면 True. tools/call 은 여기서 False 가 된다."""
+    if not request.path.startswith("/mcp"):
+        return False
+    body = request.get_json(silent=True)
+    if isinstance(body, dict):
+        return body.get("method") in MCP_OPEN_METHODS
+    if isinstance(body, list):
+        return all(b.get("method") in MCP_OPEN_METHODS for b in body if isinstance(b, dict))
+    return False
+
+
 @app.before_request
 def _gate():
     if request.path in OPEN_PATHS:
         return None
+    # OAuth 탐색 주소는 401 이 아니라 404 로 답해야 한다. 401 을 주면
+    # 클라이언트가 OAuth 서버로 오해하고 등록을 시도하다 실패한다.
+    if request.path.startswith("/.well-known/"):
+        return jsonify({"error": "not found"}), 404
     if not TOKEN:
         return jsonify({"error": "서버에 토큰이 설정되지 않았습니다."}), 503
+    if _is_open_mcp_call():
+        return None
     if not _token_ok(_presented_token()):
         return jsonify({"error": "인증이 필요합니다."}), 401
     return None
@@ -389,6 +413,9 @@ def _mcp_dispatch(body):
     elif method == "tools/list":
         result = {"tools": MCP_TOOLS}
     elif method == "tools/call":
+        if not _token_ok(_presented_token()):
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32001, "message": "인증이 필요합니다."}}
         params = body.get("params") or {}
         if params.get("name") != "save_image":
             return {"jsonrpc": "2.0", "id": rpc_id,
