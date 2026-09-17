@@ -1,3 +1,6 @@
+import base64
+import binascii
+import hmac
 import json
 import mimetypes
 import os
@@ -18,6 +21,49 @@ BLOB_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
+
+# ── 접근 제한 ─────────────────────────────────────────────────────────
+#
+# 토큰이 맞아야만 들어올 수 있다. 토큰은 두 가지로 받는다.
+#   ① Authorization: Bearer <토큰>      헤더 입력란이 있는 클라이언트
+#   ② /mcp/<토큰>                        주소만 넣을 수 있는 클라이언트
+# 연결하는 쪽 UI가 무엇을 지원하든 하나는 통하게 하려는 것이다.
+#
+# /healthz 만 열어 둔다. 배포 도구가 사이트 생존을 확인하는 주소라
+# 여기까지 잠그면 배포가 스스로 실패했다고 판단해 되돌려 버린다.
+TOKEN = os.environ.get("UPLOAD_TOKEN", "")
+OPEN_PATHS = {"/healthz"}
+
+
+def _token_ok(candidate):
+    return bool(TOKEN) and bool(candidate) and hmac.compare_digest(candidate, TOKEN)
+
+
+def _presented_token():
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    # /mcp/<토큰> 형태
+    parts = request.path.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "mcp":
+        return parts[1]
+    return ""
+
+
+@app.before_request
+def _gate():
+    if request.path in OPEN_PATHS:
+        return None
+    if not TOKEN:
+        return jsonify({"error": "서버에 토큰이 설정되지 않았습니다."}), 503
+    if not _token_ok(_presented_token()):
+        return jsonify({"error": "인증이 필요합니다."}), 401
+    return None
+
+
+@app.get("/healthz")
+def healthz():
+    return jsonify({"ok": True})
 
 _meta_lock = threading.Lock()
 _init_lock = threading.Lock()
@@ -259,6 +305,98 @@ def upload_cancel(upload_id):
         _session_path(upload_id).unlink(missing_ok=True)
     _drop_upload_lock(upload_id)
     return jsonify({"ok": True})
+
+
+# ── MCP ───────────────────────────────────────────────────────────────
+#
+# 도구 하나만 노출한다: save_image(filename, data) — data 는 base64.
+# 받은 파일은 기존 업로드와 같은 곳(blobs)에 같은 방식으로 기록한다.
+
+MCP_TOOLS = [{
+    "name": "save_image",
+    "description": "이미지를 서버에 저장한다. data 는 base64로 인코딩한 파일 내용.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "저장할 파일 이름 (예: clinic.png)"},
+            "data": {"type": "string", "description": "base64로 인코딩한 이미지"},
+        },
+        "required": ["filename", "data"],
+    },
+}]
+
+
+def _save_image(args):
+    name = _human_name(args.get("filename"))
+    raw = args.get("data") or ""
+    if "," in raw[:64] and raw.lstrip().startswith("data:"):
+        raw = raw.split(",", 1)[1]          # data:image/png;base64,... 형태도 받는다
+    try:
+        blob = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("base64 를 해독하지 못했습니다.")
+    if not blob:
+        raise ValueError("빈 파일입니다.")
+
+    final_name = _unique_blob_name(name)
+    (BLOB_DIR / final_name).write_bytes(blob)
+    item = {
+        "id": final_name,
+        "name": final_name,
+        "size": len(blob),
+        "type": mimetypes.guess_type(final_name)[0] or "application/octet-stream",
+        "uploadedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    with _meta_lock:
+        items = _load_meta()
+        items.append(item)
+        _save_meta(items)
+    return item
+
+
+def _mcp_dispatch(body):
+    rpc_id = body.get("id")
+    method = body.get("method")
+
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "upload-prj", "version": "1.0.0"},
+        }
+    elif method in ("notifications/initialized", "initialized"):
+        return None                                   # 알림에는 응답하지 않는다
+    elif method == "tools/list":
+        result = {"tools": MCP_TOOLS}
+    elif method == "tools/call":
+        params = body.get("params") or {}
+        if params.get("name") != "save_image":
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "error": {"code": -32601, "message": "없는 도구입니다."}}
+        try:
+            item = _save_image(params.get("arguments") or {})
+        except ValueError as exc:
+            return {"jsonrpc": "2.0", "id": rpc_id,
+                    "result": {"isError": True,
+                               "content": [{"type": "text", "text": str(exc)}]}}
+        result = {"content": [{"type": "text",
+                               "text": "저장했습니다: %s (%d bytes)" % (item["name"], item["size"])}]}
+    else:
+        return {"jsonrpc": "2.0", "id": rpc_id,
+                "error": {"code": -32601, "message": "지원하지 않는 method 입니다."}}
+
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
+
+
+@app.post("/mcp")
+@app.post("/mcp/<token>")
+def mcp(token=None):
+    body = request.get_json(silent=True) or {}
+    if isinstance(body, list):                        # 배치 요청
+        out = [r for r in (_mcp_dispatch(b) for b in body) if r is not None]
+        return jsonify(out) if out else ("", 204)
+    reply = _mcp_dispatch(body)
+    return ("", 204) if reply is None else jsonify(reply)
 
 
 if __name__ == "__main__":
