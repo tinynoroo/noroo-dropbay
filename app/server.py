@@ -39,16 +39,30 @@ def _token_ok(candidate):
     return bool(TOKEN) and bool(candidate) and hmac.compare_digest(candidate, TOKEN)
 
 
+# 커넥터 UI 마다 넣을 수 있는 헤더 이름이 다르다. Authorization 은 예약돼
+# 있어 막히고, 임의 이름은 승인 목록에 없다고 막히는 곳도 있다. 어느 이름이
+# 허용되는지 미리 알 수 없으므로 흔히 쓰이는 후보를 모두 받는다.
+TOKEN_HEADERS = (
+    "X-API-Key",
+    "X-Api-Key",
+    "Api-Key",
+    "X-Auth-Token",
+    "X-Access-Token",
+    "X-Token",
+    "X-Upload-Token",
+)
+
+
 def _presented_token():
-    # ① 전용 헤더. Authorization 은 커넥터 UI 가 막아두는 경우가 있어
-    #    제한이 덜한 이름을 하나 더 받는다.
-    direct = request.headers.get("X-Upload-Token", "").strip()
-    if direct:
-        return direct
-    # ② 표준 Bearer
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:].strip()
+    # ① 허용 후보 헤더들
+    for name in TOKEN_HEADERS:
+        value = request.headers.get(name, "").strip()
+        if value:
+            return value
+    # ② 표준 Bearer (넣을 수 있는 UI 라면 이게 가장 깔끔하다)
+    auth = request.headers.get("Authorization", "").strip()
+    if auth:
+        return auth[7:].strip() if auth.startswith("Bearer ") else auth
     # ③ /mcp/<토큰> — 헤더를 전혀 못 넣는 UI 용
     parts = request.path.strip("/").split("/")
     if len(parts) == 2 and parts[0] == "mcp":
