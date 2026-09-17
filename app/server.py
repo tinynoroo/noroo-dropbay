@@ -76,9 +76,18 @@ def _presented_token():
     return ""
 
 
+def _looks_like_mcp(path):
+    """ChatGPT 는 /mcp 가 아니라 주소 맨 앞(/)으로 보내기도 한다."""
+    return path.startswith("/mcp") or path == "/"
+
+
 def _is_open_mcp_call():
     """접속 단계(handshake)면 True. tools/call 은 여기서 False 가 된다."""
-    if not request.path.startswith("/mcp"):
+    # 본문 없는 첫 접속은 /mcp 주소에서만 허용한다.
+    # 루트(/)까지 풀어주면 웹 화면(GET /)이 같이 열려 버린다.
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return request.path.startswith("/mcp")
+    if not _looks_like_mcp(request.path):
         return False
     body = request.get_json(silent=True)
     if isinstance(body, dict):
@@ -204,6 +213,12 @@ def _find_matching_session(fingerprint):
 @app.get("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.post("/")
+def index_mcp():
+    """루트로 들어온 JSON-RPC 를 MCP 로 처리한다."""
+    return mcp()
 
 
 @app.get("/api/files")
@@ -435,9 +450,12 @@ def _mcp_dispatch(body):
     return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
 
-@app.post("/mcp")
-@app.post("/mcp/<token>")
+@app.route("/mcp", methods=["GET", "HEAD", "POST", "OPTIONS"])
+@app.route("/mcp/<token>", methods=["GET", "HEAD", "POST", "OPTIONS"])
 def mcp(token=None):
+    # 본문 없는 접속 시도에는 살아 있다는 것만 알려준다
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return jsonify({"ok": True, "transport": "http", "server": "upload-prj"})
     body = request.get_json(silent=True) or {}
     if isinstance(body, list):                        # 배치 요청
         out = [r for r in (_mcp_dispatch(b) for b in body) if r is not None]
