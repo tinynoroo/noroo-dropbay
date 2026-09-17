@@ -110,6 +110,19 @@ def _gate():
     if _is_open_mcp_call():
         return None
     if not _token_ok(_presented_token()):
+        # 왜 막혔는지 알아야 고칠 수 있다. 본문 전체가 아니라
+        # method 이름만 남긴다 (토큰·이미지가 로그에 남지 않도록).
+        method = "?"
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            method = body.get("method") or "?"
+        elif isinstance(body, list):
+            method = ",".join(str(b.get("method")) for b in body if isinstance(b, dict)) or "?"
+        app.logger.warning(
+            "거절: %s %s method=%s 토큰=%s",
+            request.method, request.path, method,
+            "있음" if _presented_token() else "없음",
+        )
         return jsonify({"error": "인증이 필요합니다."}), 401
     return None
 
