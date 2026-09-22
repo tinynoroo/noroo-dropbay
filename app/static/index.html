@@ -60,6 +60,7 @@
   .logo svg { width: 22px; height: 22px; stroke: white; }
   header h1 { font-size: 19px; margin: 0; }
   header p { font-size: 13px; color: var(--text-dim); margin: 2px 0 0; }
+  header .logout { margin-left: auto; font-size: 13px; color: var(--text-dim); }
 
   .card {
     background: var(--surface);
@@ -202,6 +203,7 @@
     <h1>Cloud</h1>
     <p>파일을 업로드하고 목록으로 관리하세요</p>
   </div>
+  <a class="logout" href="/logout">로그아웃</a>
 </header>
 
 <div id="dropzone" class="card">
@@ -265,6 +267,7 @@ function toast(msg) {
 
 async function loadFiles() {
   const res = await fetch('/api/files');
+  if (res.status === 401) { location.href = '/login'; return; }
   const data = await res.json();
   renderFiles(data.files);
 }

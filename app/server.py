@@ -1,26 +1,36 @@
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import mimetypes
 import os
+import re
+import secrets
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory, abort
+from flask import Flask, jsonify, request, send_from_directory, abort, redirect
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 BLOB_DIR = DATA_DIR / "blobs"
 UPLOAD_DIR = DATA_DIR / "uploads"
+TICKET_DIR = DATA_DIR / "tickets"
 META_PATH = DATA_DIR / "meta.json"
 STATIC_DIR = Path(__file__).parent / "static"
 
 BLOB_DIR.mkdir(parents=True, exist_ok=True)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+TICKET_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
+# Caddy 뒤에 있으므로 X-Forwarded-Proto/Host 를 믿어야 발급하는 업로드
+# 주소가 https://upload.example.com/... 로 제대로 나온다.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 # ── 접근 제한 ─────────────────────────────────────────────────────────
 #
@@ -29,10 +39,18 @@ app = Flask(__name__, static_folder=None)
 #   ② /mcp/<토큰>                        주소만 넣을 수 있는 클라이언트
 # 연결하는 쪽 UI가 무엇을 지원하든 하나는 통하게 하려는 것이다.
 #
-# /healthz 만 열어 둔다. 배포 도구가 사이트 생존을 확인하는 주소라
+# /healthz 는 열어 둔다. 배포 도구가 사이트 생존을 확인하는 주소라
 # 여기까지 잠그면 배포가 스스로 실패했다고 판단해 되돌려 버린다.
+# 로그인 화면과 1회용 업로드 주소(/api/submit/<티켓>)도 자체 인증을 한다.
+#
+# 웹 화면은 토큰 대신 비밀번호(UPLOAD_PASSWORD)로 로그인하고, 로그인하면
+# 서명된 쿠키를 받는다. 비밀번호가 설정돼 있지 않으면 웹 로그인은 막힌다.
 TOKEN = os.environ.get("UPLOAD_TOKEN", "")
-OPEN_PATHS = {"/healthz"}
+PASSWORD = os.environ.get("UPLOAD_PASSWORD", "")
+OPEN_PATHS = {"/healthz", "/login", "/logout"}
+OPEN_PREFIXES = ("/api/submit/",)
+SESSION_COOKIE = "upload_session"
+SESSION_TTL = 30 * 24 * 3600
 
 # MCP 클라이언트는 인증 없는 401 을 "이 서버는 OAuth 를 쓴다"는 신호로 읽는다.
 # 그래서 /mcp 의 접속 단계(initialize, tools/list)는 토큰 없이 통과시키고,
@@ -97,14 +115,68 @@ def _is_open_mcp_call():
     return False
 
 
+# ── 웹 로그인 세션 ─────────────────────────────────────────────────────
+#
+# 쿠키 값은 "만료시각.서명". 서명 키에 비밀번호가 섞여 있어서 비밀번호를
+# 바꾸면 기존 로그인이 전부 풀린다.
+
+def _session_sig(exp):
+    key = hashlib.sha256(("session:%s:%s" % (PASSWORD, TOKEN)).encode()).digest()
+    return hmac.new(key, exp.encode(), hashlib.sha256).hexdigest()
+
+
+def _session_ok():
+    if not PASSWORD:
+        return False
+    exp, _, sig = request.cookies.get(SESSION_COOKIE, "").partition(".")
+    if not exp.isdigit() or int(exp) < time.time():
+        return False
+    return hmac.compare_digest(sig, _session_sig(exp))
+
+
+@app.get("/login")
+def login_page():
+    if _session_ok():
+        return redirect("/")
+    return send_from_directory(STATIC_DIR, "login.html")
+
+
+@app.post("/login")
+def login():
+    if not PASSWORD:
+        return jsonify({"error": "서버에 비밀번호가 설정되지 않았습니다."}), 503
+    given = request.form.get("password", "")
+    if not hmac.compare_digest(given.encode(), PASSWORD.encode()):
+        time.sleep(1)                     # 무작위 대입을 느리게 만든다
+        return redirect("/login?e=1", code=303)
+    exp = str(int(time.time()) + SESSION_TTL)
+    resp = redirect("/", code=303)
+    resp.set_cookie(SESSION_COOKIE, "%s.%s" % (exp, _session_sig(exp)),
+                    max_age=SESSION_TTL, httponly=True, samesite="Lax",
+                    secure=request.is_secure)
+    return resp
+
+
+@app.get("/logout")
+def logout():
+    resp = redirect("/login", code=303)
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
+
+
 @app.before_request
 def _gate():
-    if request.path in OPEN_PATHS:
+    if request.path in OPEN_PATHS or request.path.startswith(OPEN_PREFIXES):
         return None
     # OAuth 탐색 주소는 401 이 아니라 404 로 답해야 한다. 401 을 주면
     # 클라이언트가 OAuth 서버로 오해하고 등록을 시도하다 실패한다.
     if request.path.startswith("/.well-known/"):
         return jsonify({"error": "not found"}), 404
+    if _session_ok():
+        return None
+    # 브라우저로 첫 화면에 들어오면 로그인 화면으로 보낸다.
+    if request.method == "GET" and request.path == "/":
+        return redirect("/login")
     if not TOKEN:
         return jsonify({"error": "서버에 토큰이 설정되지 않았습니다."}), 503
     if _is_open_mcp_call():
@@ -205,6 +277,24 @@ def _unique_blob_name(name):
     while (BLOB_DIR / ("%s (%d)%s" % (stem, n, suffix))).exists():
         n += 1
     return "%s (%d)%s" % (stem, n, suffix)
+
+
+def _publish_blob(src, name, mimetype=None):
+    """다 받은 파일(src)을 blobs 로 옮기고 목록(meta.json)에 올린다."""
+    final_name = _unique_blob_name(name)
+    src.replace(BLOB_DIR / final_name)
+    item = {
+        "id": final_name,
+        "name": final_name,
+        "size": (BLOB_DIR / final_name).stat().st_size,
+        "type": mimetype or mimetypes.guess_type(final_name)[0] or "application/octet-stream",
+        "uploadedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    with _meta_lock:
+        items = _load_meta()
+        items.append(item)
+        _save_meta(items)
+    return item
 
 
 def _find_matching_session(fingerprint):
@@ -351,19 +441,7 @@ def upload_complete(upload_id):
         if received != session["size"]:
             return jsonify({"error": "전송이 끝나지 않았습니다.", "receivedBytes": received}), 409
 
-        final_name = _unique_blob_name(session["name"])
-        item = {
-            "id": final_name,
-            "name": final_name,
-            "size": session["size"],
-            "type": session["type"],
-            "uploadedAt": datetime.now(timezone.utc).isoformat(),
-        }
-        _part_path(upload_id).replace(BLOB_DIR / final_name)
-        with _meta_lock:
-            items = _load_meta()
-            items.append(item)
-            _save_meta(items)
+        item = _publish_blob(_part_path(upload_id), session["name"], session["type"])
         _session_path(upload_id).unlink(missing_ok=True)
 
     _drop_upload_lock(upload_id)
@@ -395,6 +473,22 @@ MCP_TOOLS = [{
         },
         "required": ["filename", "data"],
     },
+}, {
+    "name": "request_upload",
+    "description": (
+        "큰 파일(이미지 외 모든 형식)을 올릴 때 쓴다. 파일 내용 대신 1회용 업로드 "
+        "주소(submitUrl)를 발급한다. 주소는 10분 뒤 만료되고 한 번만 쓸 수 있다. "
+        "발급받은 주소로 파일 원본을 HTTP PUT 으로 보내면 저장된다 "
+        "(예: curl -T ./photo.png \"<submitUrl>\"). 직접 HTTP 요청을 보낼 수 없으면 "
+        "주소를 사용자에게 알려주고 브라우저로 열어 올리게 한다."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "filename": {"type": "string", "description": "저장할 파일 이름 (예: clinic.png)"},
+        },
+        "required": ["filename"],
+    },
 }]
 
 
@@ -410,20 +504,117 @@ def _save_image(args):
     if not blob:
         raise ValueError("빈 파일입니다.")
 
-    final_name = _unique_blob_name(name)
-    (BLOB_DIR / final_name).write_bytes(blob)
-    item = {
-        "id": final_name,
-        "name": final_name,
-        "size": len(blob),
-        "type": mimetypes.guess_type(final_name)[0] or "application/octet-stream",
-        "uploadedAt": datetime.now(timezone.utc).isoformat(),
-    }
-    with _meta_lock:
-        items = _load_meta()
-        items.append(item)
-        _save_meta(items)
-    return item
+    tmp = UPLOAD_DIR / ("%s.part" % uuid.uuid4().hex)
+    tmp.write_bytes(blob)
+    return _publish_blob(tmp, name)
+
+
+# ── 1회용 업로드 주소 (Figma MCP 의 upload_assets 와 같은 방식) ─────────
+#
+# base64 를 도구 인자에 통째로 넣으면 모델 출력 길이에 막혀 큰 파일을
+# 못 보낸다. 그래서 MCP 는 주소만 발급하고, 파일은 그 주소로 일반 HTTP
+# 요청(curl -T 등)이나 브라우저로 직접 보낸다.
+#   - 주소 자체가 인증이다 (추측 불가능한 티켓). 10분 뒤 만료, 한 번만 쓴다.
+#   - 티켓은 디스크에 있어 서버가 재시작돼도 유효하다.
+
+TICKET_TTL = 600
+_TICKET_RE = re.compile(r"[A-Za-z0-9_-]{32,64}")
+
+
+def _ticket_path(ticket):
+    return TICKET_DIR / ("%s.json" % ticket)
+
+
+def _load_ticket(ticket):
+    if not _TICKET_RE.fullmatch(ticket):
+        return None
+    try:
+        data = json.loads(_ticket_path(ticket).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("expiresAt", 0) < time.time():
+        _ticket_path(ticket).unlink(missing_ok=True)
+        return None
+    return data
+
+
+def _request_upload(args):
+    name = _human_name(args.get("filename"))
+    now = time.time()
+    for path in TICKET_DIR.glob("*.json"):         # 만료된 티켓 정리
+        try:
+            if json.loads(path.read_text()).get("expiresAt", 0) < now:
+                path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+    ticket = secrets.token_urlsafe(32)
+    _ticket_path(ticket).write_text(json.dumps(
+        {"name": name, "expiresAt": now + TICKET_TTL}, ensure_ascii=False))
+    url = "%s/api/submit/%s" % (request.host_url.rstrip("/"), ticket)
+    return url, name
+
+
+@app.route("/api/submit/<ticket>", methods=["GET"])
+def submit_form(ticket):
+    """사람이 주소를 브라우저로 열었을 때 쓰는 최소한의 업로드 화면."""
+    info = _load_ticket(ticket)
+    if not info:
+        return "업로드 주소가 만료됐거나 이미 사용됐습니다.", 404
+    return (
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>업로드</title><body style='font-family:sans-serif;padding:24px'>"
+        "<p>저장될 이름: <b>%s</b> (10분 안에 한 번만 쓸 수 있습니다)</p>"
+        "<form method=post enctype=multipart/form-data>"
+        "<input type=file name=file required> <button>업로드</button></form>"
+    ) % _escape(info["name"])
+
+
+@app.route("/api/submit/<ticket>", methods=["PUT", "POST"])
+def submit(ticket):
+    if not _load_ticket(ticket):
+        return jsonify({"error": "업로드 주소가 만료됐거나 이미 사용됐습니다."}), 404
+    # 한 번만 쓰도록 먼저 티켓을 가져간다. rename 은 원자적이라 동시에
+    # 두 요청이 와도 하나만 성공한다.
+    claimed = TICKET_DIR / ("%s.claimed" % ticket)
+    try:
+        _ticket_path(ticket).rename(claimed)
+    except FileNotFoundError:
+        return jsonify({"error": "업로드 주소가 이미 사용됐습니다."}), 404
+    info = json.loads(claimed.read_text())
+
+    tmp = UPLOAD_DIR / ("%s.part" % uuid.uuid4().hex)
+    form_upload = "file" in request.files
+    try:
+        if form_upload:
+            request.files["file"].save(tmp)
+        else:
+            with open(tmp, "wb") as fh:
+                while True:
+                    chunk = request.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+        if tmp.stat().st_size == 0:
+            raise ValueError("빈 파일입니다.")
+        item = _publish_blob(tmp, info["name"])
+    except Exception as exc:
+        # 전송이 끊기는 등 실패하면 아직 만료 전인 티켓은 다시 쓸 수 있게 돌려놓는다.
+        tmp.unlink(missing_ok=True)
+        claimed.rename(_ticket_path(ticket))
+        if isinstance(exc, ValueError):
+            return jsonify({"error": str(exc)}), 400
+        raise
+    claimed.unlink(missing_ok=True)
+
+    if form_upload:
+        return "저장했습니다: %s (%d bytes)" % (_escape(item["name"]), item["size"]), 201
+    return jsonify({"saved": item}), 201
+
+
+def _escape(s):
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;").replace("'", "&#39;"))
 
 
 def _mcp_dispatch(body):
@@ -445,17 +636,32 @@ def _mcp_dispatch(body):
             return {"jsonrpc": "2.0", "id": rpc_id,
                     "error": {"code": -32001, "message": "인증이 필요합니다."}}
         params = body.get("params") or {}
-        if params.get("name") != "save_image":
+        tool = params.get("name")
+        args = params.get("arguments") or {}
+        if tool == "save_image":
+            try:
+                item = _save_image(args)
+            except ValueError as exc:
+                return {"jsonrpc": "2.0", "id": rpc_id,
+                        "result": {"isError": True,
+                                   "content": [{"type": "text", "text": str(exc)}]}}
+            text = "저장했습니다: %s (%d bytes)" % (item["name"], item["size"])
+            result = {"content": [{"type": "text", "text": text}]}
+        elif tool == "request_upload":
+            url, name = _request_upload(args)
+            text = (
+                "submitUrl: %s\n"
+                "10분 안에 한 번만 쓸 수 있습니다. 파일 원본을 PUT 으로 보내세요:\n"
+                "  curl -T <로컬 파일 경로> \"%s\"\n"
+                "HTTP 요청을 보낼 수 없다면 이 주소를 사용자에게 주고 브라우저로 열어 "
+                "올리게 하세요. 저장될 이름: %s"
+            ) % (url, url, name)
+            result = {"content": [{"type": "text", "text": text}],
+                      "structuredContent": {"submitUrl": url, "filename": name,
+                                            "expiresInSeconds": TICKET_TTL}}
+        else:
             return {"jsonrpc": "2.0", "id": rpc_id,
                     "error": {"code": -32601, "message": "없는 도구입니다."}}
-        try:
-            item = _save_image(params.get("arguments") or {})
-        except ValueError as exc:
-            return {"jsonrpc": "2.0", "id": rpc_id,
-                    "result": {"isError": True,
-                               "content": [{"type": "text", "text": str(exc)}]}}
-        result = {"content": [{"type": "text",
-                               "text": "저장했습니다: %s (%d bytes)" % (item["name"], item["size"])}]}
     else:
         return {"jsonrpc": "2.0", "id": rpc_id,
                 "error": {"code": -32601, "message": "지원하지 않는 method 입니다."}}

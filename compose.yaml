@@ -8,9 +8,11 @@ services:
     # 호스트 사용자(1000:1000)로 돌려서 파일이 root 소유가 되지
     # 않고 sudo 없이 바로 열어볼 수 있게 한다.
     user: "1000:1000"
-    # 접근 토큰. 값은 저장소가 아니라 ~/srv/upload-prj/.env 에 둔다.
+    # 접근 토큰(MCP·API)과 웹 로그인 비밀번호. 값은 저장소가 아니라
+    # ~/srv/upload-prj/.env 에 둔다.
     environment:
       UPLOAD_TOKEN: ${UPLOAD_TOKEN:?UPLOAD_TOKEN 이 필요합니다}
+      UPLOAD_PASSWORD: ${UPLOAD_PASSWORD:?UPLOAD_PASSWORD 가 필요합니다}
     ports:
       # 호스트 Caddy가 이 포트로 프록시한다. app.json 의 port 와 같아야 한다.
       - "127.0.0.1:9002:8000"
