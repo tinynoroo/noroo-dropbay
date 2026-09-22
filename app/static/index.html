@@ -368,10 +368,42 @@ function renderQueueItem(item) {
   } else if (item.status === 'done') {
     statusHtml = `<span>완료</span>`;
   } else {
-    statusHtml = `<span>${pct}%</span><button class="link-btn" data-action="cancel">취소</button>`;
+    const speedPart = item.speedText ? ` · ${item.speedText}` : '';
+    statusHtml = `<span>${pct}%${speedPart}</span><button class="link-btn" data-action="cancel">취소</button>`;
   }
   item.el.innerHTML = `<div class="row"><span class="name">${escapeHtml(item.file.name)}</span><span class="status">${statusHtml}</span></div><div class="bar"><div style="width:${pct}%"></div></div>`;
 }
+
+// ── 업로드 속도 표시 ─────────────────────────────────────────────────
+//
+// 1초마다 item.offset의 변화량을 측정해 초당 전송량을 계산한다.
+
+const activeSpeedItems = new Set();
+
+function startSpeedTracking(item) {
+  item.lastOffset = item.offset;
+  item.lastSampleTime = Date.now();
+  item.speedText = '';
+  activeSpeedItems.add(item);
+}
+
+function stopSpeedTracking(item) {
+  activeSpeedItems.delete(item);
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const item of activeSpeedItems) {
+    if (item.status !== 'uploading') continue;
+    const elapsed = (now - item.lastSampleTime) / 1000;
+    if (elapsed <= 0) continue;
+    const bytesDelta = item.offset - item.lastOffset;
+    item.lastOffset = item.offset;
+    item.lastSampleTime = now;
+    item.speedText = bytesDelta > 0 ? fmtSize(bytesDelta / elapsed) + '/s' : '';
+    renderQueueItem(item);
+  }
+}, 1000);
 
 async function requestWithRetry(fn, item) {
   let attempt = 0;
@@ -416,6 +448,8 @@ async function driveUpload(item) {
     const data = await res.json();
     item.uploadId = data.uploadId;
     item.offset = data.receivedBytes;
+    item.lastOffset = data.receivedBytes;
+    item.lastSampleTime = Date.now();
     if (data.resumed && data.receivedBytes > 0) {
       toast(`이어서 업로드합니다 (${Math.round((data.receivedBytes / item.file.size) * 100)}%부터)`);
     }
@@ -442,6 +476,7 @@ async function driveUpload(item) {
     return driveUpload(item);
   }
   item.status = 'done';
+  stopSpeedTracking(item);
   renderQueueItem(item);
   setTimeout(() => item.el.remove(), 1200);
   loadFiles();
@@ -449,6 +484,7 @@ async function driveUpload(item) {
 
 async function cancelUpload(item) {
   item.cancelled = true;
+  stopSpeedTracking(item);
   kickAll();
   item.el.remove();
   if (item.uploadId) {
@@ -461,6 +497,7 @@ function restartUpload(item) {
   item.uploadId = null;
   item.offset = 0;
   item.status = 'uploading';
+  startSpeedTracking(item);
   renderQueueItem(item);
   driveUpload(item);
 }
@@ -485,6 +522,7 @@ function uploadFiles(fileList) {
     queueEl.appendChild(el);
     const item = { file, el, uploadId: null, offset: 0, status: 'uploading', cancelled: false };
     el._item = item;
+    startSpeedTracking(item);
     renderQueueItem(item);
     driveUpload(item);
   }
