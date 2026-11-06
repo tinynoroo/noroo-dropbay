@@ -1,5 +1,7 @@
 # noroo-dropbay
 
+**English** | [한국어](README.ko.md)
+
 A self-hosted file drop for you and your AI.
 
 You upload from the browser. Your AI assistant uploads over MCP. Both land in the same folder on your server, under their original filenames. The interface is in Korean.
